@@ -3,11 +3,10 @@ import type { OrchestrationDb } from '../orchestration-db'
 import { pruneSettledChatOutputCopies } from './settled-chat-output-copy-prune'
 import {
   deleteExpiredOrchestrationRows,
-  deleteRetiredRun,
   EXPIRED_ROW_SWEEPS,
-  listRetiredRunCandidates,
-  type RunPartyLiveness
+  listRetiredRunCandidates
 } from './settled-run-retention'
+import { retireSettledRun, type RunPartyLiveness } from './settled-run-retirement'
 
 const MINUTE = 60_000
 const PRUNE_INTERVAL_MS = 60 * MINUTE
@@ -104,18 +103,22 @@ export class OrchestrationDbMaintenance {
       if (!page) {
         return false
       }
-      for (const runId of page.retired) {
-        const step = await this.slice(() => {
-          try {
-            deleteRetiredRun(db, runId, this.runPartyLiveness)
-          } catch (error) {
-            // One Run that cannot go must not hold back the others; the next pass retries it.
-            console.warn('[orchestration] settled Run retention failed', { runId, error })
+      for (const runId of page.candidates) {
+        const steps = retireSettledRun(db, runId, this.runPartyLiveness)
+        for (let done = false; !done;) {
+          const step = await this.slice(() => {
+            try {
+              return steps.next().done === true
+            } catch (error) {
+              // One Run that cannot go must not hold back the others; the next pass retries it.
+              console.warn('[orchestration] settled Run retention failed', { runId, error })
+              return true
+            }
+          })
+          if (step === undefined) {
+            return false
           }
-          return true
-        })
-        if (!step) {
-          return false
+          done = step
         }
       }
       after = page.next
